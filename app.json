@@ -3,8 +3,8 @@
   "kind": "extension",
   "version": "0.1.0",
   "name": {
-    "zh": "city-radio",
-    "en": "city-radio"
+    "zh": "城市收音机",
+    "en": "City Radio"
   },
   "boards": [
     "tikpal-r1"
@@ -15,30 +15,37 @@
   "capabilities": {},
   "launch": {
     "summary": {
-      "zh": "计数器样板：短按加一，按住清零。",
-      "en": "Counter template: tap to count, hold to reset."
+      "zh": "城市收音机：听北京、杭州、深圳的新闻、交通和音乐广播，滑动换台。",
+      "en": "City Radio: live news, traffic and music stations from Beijing, Hangzhou and Shenzhen; swipe to change."
     },
     "examples": {
       "zh": [
-        "打开计数器",
-        "帮我数数"
+        "打开城市收音机",
+        "打开收音机",
+        "我想听广播",
+        "听一下交通台",
+        "放点电台"
       ],
       "en": [
-        "Open the counter",
-        "Count for me"
+        "Open City Radio",
+        "Open the radio",
+        "I want to listen to the radio",
+        "Play the traffic station"
       ]
     }
   },
   "aliases": {
     "zh": [
-      "计数器"
+      "收音机",
+      "电台",
+      "广播"
     ],
     "en": [
-      "Counter"
+      "Radio"
     ]
   },
   "scenes": [
-    "tools"
+    "relax"
   ],
   "audience": "all",
   "pricing": {

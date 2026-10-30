@@ -16,7 +16,9 @@ set(EXTRA_COMPONENT_DIRS
     "${YAYKIT_FIRMWARE}/components/yaykit_board"
     "${YAYKIT_FIRMWARE}/components/yaykit_key"
     "${YAYKIT_FIRMWARE}/components/yaykit_link"
-    "${YAYKIT_FIRMWARE}/components/yaykit_ui")
+    "${YAYKIT_FIRMWARE}/components/yaykit_speak"
+    "${YAYKIT_FIRMWARE}/components/yaykit_ui"
+    "${YAYKIT_FIRMWARE}/components/yaykit_wifi")
 set(COMPONENTS main espcoredump)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 include(${YAYKIT_FIRMWARE}/reproducible.cmake)
