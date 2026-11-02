@@ -35,7 +35,7 @@ static const char *TAG = "radio";
 #define TASK_STACK 8192
 
 static struct {
-    volatile int station;
+    const station_t *volatile station;
     volatile bool want;
     volatile uint32_t gen;  // bumped on every request: the tasks drop what they do when it changes
     volatile radio_state_t state;
@@ -55,15 +55,15 @@ static const char *const NAMES[] = {"idle", "wait_net", "connecting", "playing",
 
 const char *radio_state_name(radio_state_t s) { return s <= RADIO_RETRYING ? NAMES[s] : "?"; }
 radio_state_t radio_state(void) { return S.state; }
-int radio_station(void) { return S.station; }
+const station_t *radio_station(void) { return S.station; }
 
 void radio_stats(radio_stats_t *out) {
     *out = S.stats;
     out->buffered = S.net ? (uint32_t)xStreamBufferBytesAvailable(S.net) : 0;
 }
 
-void radio_play(int station) {
-    S.station = station_step(station, 0);
+void radio_play(const station_t *station) {
+    S.station = station;
     S.want = true;
     S.gen++;
     if (S.task) xTaskNotifyGive(S.task);
@@ -306,7 +306,7 @@ static void radio_task(void *arg) {
             S.state = RADIO_WAIT_NET;
             if (!yk_wifi_wait_connected(1000)) continue;
         }
-        if (play_stream(station_at(S.station), gen)) continue;  // the request changed
+        if (play_stream(S.station, gen)) continue;  // the request changed
         ESP_LOGE(TAG, "the decoder did not start");  // out of memory: the reader reconnects by itself otherwise
         S.state = RADIO_RETRYING;
         wait_same(gen, RETRY_MS);

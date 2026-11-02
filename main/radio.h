@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "stations.h"
 
 typedef enum {
     RADIO_IDLE,        // stopped
@@ -20,13 +21,13 @@ typedef enum {
 
 /** After yk_speak_init_cfg(). Creates the tasks. */
 esp_err_t radio_init(void);
-/** Plays the station at this index (stations.h); another station stops the current one first. */
-void radio_play(int station);
+/** Plays this station (one of stations.h's); another station stops the current one first. */
+void radio_play(const station_t *station);
 void radio_stop(void);
 radio_state_t radio_state(void);
 const char *radio_state_name(radio_state_t s);
 /** The station wanted (or last played). */
-int radio_station(void);
+const station_t *radio_station(void);
 
 typedef struct {
     uint32_t connects, failures, redirects;

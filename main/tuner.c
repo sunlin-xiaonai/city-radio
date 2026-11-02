@@ -32,9 +32,12 @@
 #define BARS_Y 302        // the bars' centre line
 
 static lv_obj_t *s_screen, *s_city, *s_freq, *s_name, *s_needle;
+static lv_obj_t *s_dots;    // the station dots of the city shown
+static int s_dots_city = -1;
 static lv_obj_t *s_bars[BARS];
 static lv_point_precise_t s_needle_pts[2];
 static int s_needle_pm = -1;  // where the needle is, permille of the dial
+static bool s_english;
 static float s_bar_h[BARS];
 static uint32_t s_seed = 0x2545F491;
 
@@ -70,6 +73,8 @@ static lv_obj_t *circle(lv_obj_t *parent, int d, int cx, int cy) {
     return o;
 }
 
+void tuner_set_english(bool on) { s_english = on; }
+
 void tuner_create(lv_obj_t *screen) {
     s_screen = screen;
     lv_obj_t *ring = circle(screen, 2 * RING_R, YK_CX, YK_CY);
@@ -98,14 +103,13 @@ void tuner_create(lv_obj_t *screen) {
     lv_obj_set_style_length(scale, 12, LV_PART_INDICATOR);
     lv_obj_set_clickable(scale, false);
 
-    // A dot per station, centred on the baseline.
-    for (int i = 0; i < stations_count(); i++) {
-        lv_point_precise_t p;
-        point_at(dial_deg(dial_permille(station_at(i)->mhz10)), DIAL_R - 1, &p);
-        lv_obj_t *dot = circle(screen, DOT_D, (int)lroundf(p.x), (int)lroundf(p.y));
-        lv_obj_set_style_bg_color(dot, lv_color_hex(YK_SAGE), 0);
-        lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
-    }
+    // The station dots go in here (tuner_show_station), under the needle.
+    s_dots = lv_obj_create(screen);
+    lv_obj_remove_style_all(s_dots);
+    lv_obj_set_size(s_dots, 466, 466);
+    lv_obj_set_clickable(s_dots, false);
+    lv_obj_set_event_bubble(s_dots, true);
+    lv_obj_set_gesture_bubble(s_dots, true);
 
     s_needle = lv_line_create(screen);
     lv_obj_set_style_line_color(s_needle, lv_color_hex(YK_CORAL), 0);
@@ -132,15 +136,30 @@ void tuner_create(lv_obj_t *screen) {
     }
 }
 
-void tuner_show_station(int index, bool slide) {
-    const station_t *st = station_at(index);
+/** A dot per station of the city, centred on the baseline. */
+static void show_dots(int city) {
+    if (city == s_dots_city) return;
+    s_dots_city = city;
+    lv_obj_clean(s_dots);
+    for (int i = 0; i < city_stations(city); i++) {
+        lv_point_precise_t p;
+        point_at(dial_deg(dial_permille(station_at(city, i)->mhz10)), DIAL_R - 1, &p);
+        lv_obj_t *dot = circle(s_dots, DOT_D, (int)lroundf(p.x), (int)lroundf(p.y));
+        lv_obj_set_style_bg_color(dot, lv_color_hex(YK_SAGE), 0);
+        lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+    }
+}
+
+void tuner_show_station(int city, int index, bool slide) {
+    const station_t *st = station_at(city, index);
+    show_dots(city);
     char text[16];
     station_freq_text(st, text, sizeof(text));
     lv_label_set_text(s_freq, text);
-    lv_label_set_text(s_name, st->name);
+    lv_label_set_text(s_name, station_name(st, s_english));
     // The city along the top of the circle (one label per character: short names only).
     if (s_city) lv_obj_delete(s_city);
-    s_city = yk_ui_arc_label(s_screen, st->city, YK_SIZE_STATUS, YK_SAGE_TEXT, 0, CITY_R, false);
+    s_city = yk_ui_arc_label(s_screen, station_city(st, s_english), YK_SIZE_STATUS, YK_SAGE_TEXT, 0, CITY_R, false);
     const int target = dial_permille(st->mhz10);
     lv_anim_delete(NULL, needle_anim);
     if (!slide || s_needle_pm < 0) {

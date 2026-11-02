@@ -14,6 +14,7 @@ endif()
 set(EXTRA_COMPONENT_DIRS
     "${YAYKIT_FIRMWARE}/components/yaykit_app"
     "${YAYKIT_FIRMWARE}/components/yaykit_board"
+    "${YAYKIT_FIRMWARE}/components/yaykit_cloud"
     "${YAYKIT_FIRMWARE}/components/yaykit_key"
     "${YAYKIT_FIRMWARE}/components/yaykit_link"
     "${YAYKIT_FIRMWARE}/components/yaykit_speak"

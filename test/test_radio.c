@@ -17,31 +17,51 @@ static int failures, checks;
     } while (0)
 
 static void test_stations(void) {
-    const int n = stations_count();
-    CHECK(n >= 2);
-    CHECK(station_step(n - 1, 1) == 0);
-    CHECK(station_step(0, -1) == n - 1);
-    CHECK(station_at(n) == station_at(0));
-    CHECK(station_at(-1) == station_at(n - 1));
-    for (int i = 0; i < n; i++) {
-        const station_t *s = station_at(i);
-        CHECK(s->city && s->name && !strncmp(s->url, "http://", 7));
-        CHECK(s->mhz10 >= FM_MIN_10 && s->mhz10 <= FM_MAX_10);
-        if (i) CHECK(s->mhz10 > station_at(i - 1)->mhz10);  // low to high: next = to the right on the dial
+    const int cities = cities_count();
+    CHECK(cities >= 10 && cities <= 255);  // the city is kept in a byte
+    CHECK(city_wrap(cities) == 0 && city_wrap(-1) == cities - 1);
+    for (int c = 0; c < cities; c++) {
+        const int n = city_stations(c);
+        CHECK(n >= 2 && n <= 255);
+        CHECK(station_step(c, n - 1, 1) == 0);
+        CHECK(station_step(c, 0, -1) == n - 1);
+        CHECK(station_at(c, n) == station_at(c, 0));
+        CHECK(station_at(c, -1) == station_at(c, n - 1));
+        CHECK(!strcmp(city_name(c, false), station_at(c, 0)->city));
+        CHECK(!strcmp(city_name(c, true), station_at(c, 0)->city_en));
+        for (int d = 0; d < c; d++) CHECK(strcmp(city_name(c, false), city_name(d, false)));  // each city once
+        for (int i = 0; i < n; i++) {
+            const station_t *s = station_at(c, i);
+            CHECK(s->city && s->name && s->city_en && s->name_en && !strncmp(s->url, "http://", 7));
+            CHECK(!strcmp(s->city, city_name(c, false)));  // a city's stations are all in it
+            CHECK(strlen(s->city_en) <= 9);  // along the circle: short (Guangzhou, Chongqing are the longest)
+            CHECK(s->mhz10 >= FM_MIN_10 && s->mhz10 <= FM_MAX_10);
+            if (i) CHECK(s->mhz10 > station_at(c, i - 1)->mhz10);  // low to high: next = to the right on the dial
+            for (int d = 0; d < c; d++)  // no stream twice
+                for (int j = 0; j < city_stations(d); j++) CHECK(strcmp(s->url, station_at(d, j)->url));
+        }
     }
     char text[96];
-    const station_t st = {"北京", "北京交通广播", 1039, "http://x"};
+    const station_t st = {"北京", "Beijing", "北京交通广播", "Beijing Traffic", 1039, "http://x"};
     station_freq_text(&st, text, sizeof(text));
     CHECK(!strcmp(text, "103.9"));
     CHECK(dial_permille(FM_MIN_10) == 0 && dial_permille(FM_MAX_10) == 1000);
     CHECK(dial_permille(800) == 0 && dial_permille(1200) == 1000);
     CHECK(dial_permille((FM_MIN_10 + FM_MAX_10) / 2) >= 495 && dial_permille((FM_MIN_10 + FM_MAX_10) / 2) <= 500);
-    listen_sentence("北京交通广播", 25 * 60 + 10, text, sizeof(text));
+    CHECK(!strcmp(station_city(&st, false), "北京") && !strcmp(station_city(&st, true), "Beijing"));
+    CHECK(!strcmp(station_name(&st, false), "北京交通广播") && !strcmp(station_name(&st, true), "Beijing Traffic"));
+    listen_sentence(&st, 25 * 60 + 10, false, text, sizeof(text));
     CHECK(!strcmp(text, "听了北京交通广播 25 分钟"));
-    listen_sentence("北京交通广播", 89, text, sizeof(text));
+    listen_sentence(&st, 89, false, text, sizeof(text));
     CHECK(!strcmp(text, "听了北京交通广播 1 分钟"));
-    listen_sentence("北京交通广播", 20, text, sizeof(text));
+    listen_sentence(&st, 20, false, text, sizeof(text));
     CHECK(!strcmp(text, "听了一会儿北京交通广播"));
+    listen_sentence(&st, 25 * 60 + 10, true, text, sizeof(text));
+    CHECK(!strcmp(text, "Listened to Beijing Traffic for 25 minutes"));
+    listen_sentence(&st, 89, true, text, sizeof(text));
+    CHECK(!strcmp(text, "Listened to Beijing Traffic for 1 minute"));
+    listen_sentence(&st, 20, true, text, sizeof(text));
+    CHECK(!strcmp(text, "Listened to Beijing Traffic for a moment"));
 }
 
 /** Converts `frames` stereo frames of a ramp in blocks of `block`; returns the output count. */
@@ -73,6 +93,9 @@ static void test_pcm(void) {
     // Block by block (an MP3 frame is 1152) gives the same samples as all at once.
     const size_t m = convert_ramp(44100, 44100, 1152, blocks, CAP);
     CHECK(m == n && !memcmp(whole, blocks, n * sizeof(int16_t)));
+    // 32 kHz (湖北之声, 楚天交通): a second in is a second out too.
+    n = convert_ramp(32000, 32000, 1152, whole, CAP);
+    CHECK(n >= 23999 && n <= 24001);
     // Stereo is averaged to mono; a constant stays constant.
     pcm_conv_t c;
     pcm_conv_init(&c, 44100, 24000);
@@ -84,6 +107,14 @@ static void test_pcm(void) {
     for (size_t i = 0; i < n; i++) same &= out[i] == 400;
     CHECK(same);
     CHECK(pcm_conv_max_out(&c, 1152) >= 1152 * 24000 / 44100 + 1);
+    // A mono stream (长沙新闻广播) passes through as it is, only resampled.
+    pcm_conv_init(&c, 44100, 24000);
+    int16_t mono_in[441];
+    for (int i = 0; i < 441; i++) mono_in[i] = 700;
+    n = pcm_conv_run(&c, mono_in, 441, 1, out, 300);
+    same = n >= 239 && n <= 241;
+    for (size_t i = 0; i < n; i++) same &= out[i] == 700;
+    CHECK(same);
     // A full output buffer drops the rest of the block but stays in step for the next one.
     pcm_conv_init(&c, 48000, 24000);
     n = pcm_conv_run(&c, lr, 441, 2, out, 10);

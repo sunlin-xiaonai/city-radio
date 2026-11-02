@@ -1,7 +1,8 @@
 // City Radio: live city stations on the round screen. The start-up order is the template's (firmware guide 6):
 // NVS (never erased) -> yaykit_app (crash loop guard) -> board -> speaker -> side key -> Yaykit Link -> screen ->
-// console -> yk_app_ready() -> Wi-Fi. A tap on the side key plays or pauses, a hold or a swipe changes the station,
-// a double click opens the app ring (yaykit_app). Leaving, it tells Yay what was listened to and for how long.
+// console -> yk_app_ready() -> Wi-Fi. A tap on the side key plays or pauses, a swipe left or right changes the
+// station, a swipe up opens the city picker, a double click opens the app ring (yaykit_app). The side key's hold is
+// not the app's (round-screen-design.md 6). Leaving, it tells Yay what was listened to and for how long.
 #include <stdio.h>
 #include <string.h>
 
@@ -16,9 +17,11 @@
 #include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "picker.h"
 #include "radio.h"
 #include "stations.h"
 #include "tuner.h"
+#include "yaykit_account.h"
 #include "yaykit_app.h"
 #include "yaykit_key.h"
 #include "yaykit_link.h"
@@ -29,50 +32,76 @@
 
 #define APP_SLUG "city-radio"
 #define NVS_NS "yk_cityradio"
+#define HINT_US (20 * 1000000LL)  // how to use it, on the status line: 10 s tuning, then 10 s cities
 static const char *TAG = "city-radio";
 
-static int s_station;
+static int s_city, s_station;  // the station is the city's (stations.h)
 static bool s_paused;
 static int64_t s_listened_us, s_last_tick_us;  // time actually playing, this visit
 static lv_obj_t *s_status;
 static int64_t s_hint_until_us;  // the status line says how to use it for the first seconds of playing
 static yk_rim_t *s_rim;
-static volatile bool s_tapped, s_held;  // set in the key task, acted on in the LVGL task
+static volatile bool s_tapped;          // set in the key task, acted on in the LVGL task
 static volatile int s_swipe;            // -1 / +1 from a gesture, acted on in the next tick
+static volatile bool s_swiped_up;       // a swipe up: the city picker, in the next tick
+static bool s_english;                  // the owner's language is not Chinese: the screen in English
+
+/** The screen's text in its language. */
+static const char *T(const char *zh, const char *en) { return s_english ? en : zh; }
 
 /** Through yaykit_app (yk_app_on_key): returns whether the event was used. Double clicks are the system's. */
 static bool on_key(const yk_key_event_t *ev, void *ctx) {
     (void)ctx;
-    if (ev->type == YK_KEY_TAP) s_tapped = true;
-    else if (ev->type == YK_KEY_HOLD) s_held = true;
-    return ev->type == YK_KEY_TAP || ev->type == YK_KEY_HOLD;
+    if (ev->type != YK_KEY_TAP) return false;  // a hold is the system's: it offers to go back to Yay and talk
+    s_tapped = true;
+    return true;
 }
 
 /** The needle follows the finger: stations run low to high left to right on the dial, so a swipe to the right tunes
- *  up (the needle moves right) and a swipe to the left tunes down. */
+ *  up (the needle moves right) and a swipe to the left tunes down. A swipe up opens the city picker (a swipe down is
+ *  the system's status). While the picker is open its wheel takes the drags. */
 static void on_gesture(lv_event_t *e) {
     (void)e;
+    if (picker_is_open()) return;
     const lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
     if (dir == LV_DIR_RIGHT) s_swipe = 1;
     else if (dir == LV_DIR_LEFT) s_swipe = -1;
+    else if (dir == LV_DIR_TOP) s_swiped_up = true;
 }
 
+/** The city, and the station last played in each city ("st<city>"). */
 static void save_station(void) {
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
-    nvs_set_u8(h, "station", (uint8_t)s_station);
+    char key[8];
+    snprintf(key, sizeof(key), "st%d", s_city);
+    nvs_set_u8(h, "city", (uint8_t)s_city);
+    nvs_set_u8(h, key, (uint8_t)s_station);
     nvs_commit(h);
     nvs_close(h);
 }
 
-static int load_station(void) {
+/** The last station played in this city (its first, by frequency, the first time). */
+static int load_station(int city) {
     nvs_handle_t h;
     uint8_t v = 0;
+    char key[8];
+    snprintf(key, sizeof(key), "st%d", city_wrap(city));
     if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
-        nvs_get_u8(h, "station", &v);
+        nvs_get_u8(h, key, &v);
         nvs_close(h);
     }
-    return station_step(v, 0);
+    return station_step(city, v, 0);
+}
+
+static int load_city(void) {
+    nvs_handle_t h;
+    uint8_t v = 0;  // 北京 the first time
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_u8(h, "city", &v);
+        nvs_close(h);
+    }
+    return city_wrap(v);
 }
 
 /** The status line and the rim from what the player and the network are doing. Plain words, no codes. */
@@ -81,21 +110,24 @@ static void show_status(void) {
     uint32_t color = YK_INK2;
     bool connecting = false;
     if (s_paused) {
-        text = "已暂停 · 短按继续";
+        text = T("已暂停 · 短按继续", "Paused · Tap to resume");
     } else {
         switch (radio_state()) {
         case RADIO_WAIT_NET:
-            if (yk_wifi_state() == YK_WIFI_UNCONFIGURED) text = "没有网络，回到 Yay 设置", color = YK_CORAL_TEXT;
-            else if (yk_wifi_state() == YK_WIFI_FAILED) text = "网络连不上，正在重试", color = YK_CORAL_TEXT;
-            else text = "正在连网", connecting = true;
+            if (yk_wifi_state() == YK_WIFI_UNCONFIGURED) text = T("没有网络，回到 Yay 设置", "No network. Set it up in Yay"), color = YK_CORAL_TEXT;
+            else if (yk_wifi_state() == YK_WIFI_FAILED) text = T("网络连不上，正在重试", "Can't connect. Retrying"), color = YK_CORAL_TEXT;
+            else text = T("正在连网", "Connecting"), connecting = true;
             break;
-        case RADIO_CONNECTING: text = "正在调台", connecting = true; break;
+        case RADIO_CONNECTING: text = T("正在调台", "Tuning"), connecting = true; break;
         case RADIO_PLAYING:
-            text = esp_timer_get_time() < s_hint_until_us ? "左右滑动调台 · 短按暂停" : "正在播放";
+            // How to use it for the first seconds of playing: tuning, then cities.
+            if (esp_timer_get_time() < s_hint_until_us - HINT_US / 2) text = T("左右滑动调台 · 短按暂停", "Swipe to tune · Tap to pause");
+            else if (esp_timer_get_time() < s_hint_until_us) text = T("上滑换城市", "Swipe up for other cities");
+            else text = T("正在播放", "Playing");
             color = YK_SAGE_TEXT;
             break;
-        case RADIO_BUFFERING: text = "信号弱，正在缓冲", connecting = true; break;
-        case RADIO_RETRYING: text = "信号断了，正在重连", color = YK_CORAL_TEXT; break;
+        case RADIO_BUFFERING: text = T("信号弱，正在缓冲", "Weak signal. Buffering"), connecting = true; break;
+        case RADIO_RETRYING: text = T("信号断了，正在重连", "Signal lost. Reconnecting"), color = YK_CORAL_TEXT; break;
         case RADIO_IDLE: break;
         }
     }
@@ -108,12 +140,26 @@ static void show_status(void) {
 }
 
 static void tune(int delta) {
-    s_station = station_step(s_station, delta);
-    printf("CITYRADIO_TUNE station=%d name=\"%s\"\n", s_station, station_at(s_station)->name);
-    tuner_show_station(s_station, true);
+    s_station = station_step(s_city, s_station, delta);
+    printf("CITYRADIO_TUNE city=%d station=%d name=\"%s\"\n", s_city, s_station, station_at(s_city, s_station)->name);
+    tuner_show_station(s_city, s_station, true);
     save_station();
     s_paused = false;
-    radio_play(s_station);
+    radio_play(station_at(s_city, s_station));
+}
+
+/** Closes the picker on this city: another city plays the station last played there. */
+static void choose_city(int city) {
+    picker_close();
+    city = city_wrap(city);
+    if (city == s_city) return;
+    s_city = city;
+    s_station = load_station(city);
+    printf("CITYRADIO_CITY city=%d name=\"%s\"\n", s_city, city_name(s_city, false));
+    tuner_show_station(s_city, s_station, false);
+    save_station();
+    s_paused = false;
+    radio_play(station_at(s_city, s_station));
 }
 
 /** LVGL timer: runs with the board lock held, so it may touch the screen. */
@@ -122,16 +168,24 @@ static void tick(lv_timer_t *timer) {
     const int64_t now = esp_timer_get_time();
     if (radio_state() == RADIO_PLAYING && !s_paused) s_listened_us += now - s_last_tick_us;
     s_last_tick_us = now;
+    if (picker_is_open()) {
+        // A city tapped; the side key's tap goes back without changing. The player plays on meanwhile.
+        const int city = picker_take_choice();
+        if (city >= 0) choose_city(city);
+        else if (s_tapped) picker_close(), printf("CITYRADIO_PICKER closed\n");
+        s_tapped = false;
+        s_swipe = 0;
+    } else if (s_swiped_up) {
+        picker_open(s_city, s_english);
+        printf("CITYRADIO_PICKER open\n");
+    }
+    s_swiped_up = false;
     if (s_tapped) {
         s_tapped = false;
         s_paused = !s_paused;
         printf("CITYRADIO_%s\n", s_paused ? "PAUSE" : "RESUME");
         if (s_paused) radio_stop();
-        else radio_play(s_station);
-    }
-    if (s_held) {
-        s_held = false;
-        tune(1);
+        else radio_play(station_at(s_city, s_station));
     }
     if (s_swipe) {
         const int d = s_swipe;
@@ -147,19 +201,19 @@ static void on_leave(void *ctx) {
     (void)ctx;
     const int seconds = (int)(s_listened_us / 1000000);
     if (seconds < 5) return;  // nothing really heard: Yay just comes back
-    const station_t *st = station_at(s_station);
+    const station_t *st = station_at(s_city, s_station);
     const int minutes = (seconds + 30) / 60;
-    char data[160];
+    char data[160];  // the record keeps the stations' own (Chinese) names
     snprintf(data, sizeof(data), "{\"station\":\"%s\",\"city\":\"%s\",\"seconds\":%d}", st->name, st->city, seconds);
     const bool recorded = yk_app_record("cityradio.listen", data) == ESP_OK;
     yk_summary_t summary;
     yk_summary_init(&summary);
     char value[12];
     snprintf(value, sizeof(value), "%d", minutes);
-    yk_summary_stat(&summary, value, "分钟");
+    yk_summary_stat(&summary, value, T("分钟", "min"));
     summary.recorded = recorded;
     char sentence[96];
-    listen_sentence(st->name, seconds, sentence, sizeof(sentence));
+    listen_sentence(st, seconds, s_english, sentence, sizeof(sentence));
     cJSON *doc = cJSON_Parse(data);
     yk_app_set_result_summary(sentence, &summary, doc);
     cJSON_Delete(doc);
@@ -172,12 +226,39 @@ static esp_err_t on_command(const char *name, const cJSON *args, cJSON *reply, c
     if (err != ESP_ERR_NOT_SUPPORTED) return err;
     err = yk_wifi_command(name, args, reply, code);  // wifi.scan, wifi.join: `kit` / yay_dev.py wifi-join
     if (err != ESP_ERR_NOT_FOUND) return err;
+    if (!strcmp(name, "cityradio.english")) {  // {"on":true}: the English screen without changing the account
+        const cJSON *on = cJSON_GetObjectItem(args, "on");
+        board_lock(-1);
+        s_english = cJSON_IsTrue(on);
+        yk_ui_set_english(s_english);
+        tuner_set_english(s_english);
+        tuner_show_station(s_city, s_station, false);
+        if (picker_is_open()) picker_open(s_city, s_english);
+        show_status();
+        board_unlock();
+        cJSON_AddBoolToObject(reply, "english", s_english);
+        return ESP_OK;
+    }
+    if (!strcmp(name, "cityradio.city")) {  // {"city":2}: as if chosen in the picker; {"picker":true} opens it
+        const cJSON *city = cJSON_GetObjectItem(args, "city"), *picker = cJSON_GetObjectItem(args, "picker");
+        board_lock(-1);
+        if (cJSON_IsNumber(city)) choose_city(city->valueint);
+        else if (cJSON_IsTrue(picker)) picker_open(s_city, s_english);
+        else if (cJSON_IsFalse(picker)) picker_close();
+        cJSON_AddNumberToObject(reply, "city", s_city);
+        cJSON_AddStringToObject(reply, "name", city_name(s_city, false));
+        cJSON_AddBoolToObject(reply, "picker", picker_is_open());
+        board_unlock();
+        return ESP_OK;
+    }
     if (!strcmp(name, "cityradio.status")) {
         radio_stats_t st;
         radio_stats(&st);
-        cJSON_AddStringToObject(reply, "station", station_at(s_station)->name);
+        cJSON_AddStringToObject(reply, "city", city_name(s_city, false));
+        cJSON_AddStringToObject(reply, "station", station_at(s_city, s_station)->name);
         cJSON_AddStringToObject(reply, "state", s_paused ? "paused" : radio_state_name(radio_state()));
         cJSON_AddStringToObject(reply, "wifi", yk_wifi_state_name());
+        cJSON_AddBoolToObject(reply, "english", s_english);
         cJSON_AddNumberToObject(reply, "listenedSeconds", (double)(s_listened_us / 1000000));
         cJSON_AddNumberToObject(reply, "connects", st.connects);
         cJSON_AddNumberToObject(reply, "failures", st.failures);
@@ -240,14 +321,21 @@ void app_main(void) {
     const yk_link_config_t link = {.board = "tikpal-r1", .app_slug = APP_SLUG, .app_version = APP_VERSION,
                                    .layout = "yaykit-v1", .idle_seconds = 90, .on_command = on_command};
     ESP_ERROR_CHECK(yk_link_init(&link));
+    // The owner's language, as the account on the device keeps it (read from NVS only: this app uses no cloud).
+    if (yk_account_init(&(yk_account_config_t){.app_slug = APP_SLUG, .app_version = APP_VERSION,
+                                               .board = "tikpal-r1"}) == ESP_OK)
+        s_english = yk_account_english();
     // 5. Launch parameters from Yay (read once; this version takes none).
     yk_launch_t launch;
     if (yk_app_launch(&launch) == ESP_OK && launch.present) printf("CITY_RADIO_LAUNCH intent=%s params=%s\n", launch.intent, launch.params);
-    s_station = load_station();
+    s_city = load_city();
+    s_station = load_station(s_city);
 
     // 6. The screen; then confirm the image (the bootloader would roll back an app that never gets here).
     board_lock(-1);
     ESP_ERROR_CHECK(cjk_font_init());
+    yk_ui_set_english(s_english);  // the shared pages and hints
+    tuner_set_english(s_english);
     lv_obj_t *screen = lv_obj_create(NULL);
     lv_obj_set_scrollable(screen, false);
     lv_obj_set_style_bg_color(screen, lv_color_hex(YK_PAPER), 0);
@@ -256,8 +344,9 @@ void app_main(void) {
     // The round-screen spec's colours and sizes (yk_round.h); text inside the radius-200 circle.
     tuner_create(screen);
     s_status = yk_ui_label(screen, "", 0, 334, 466, YK_SIZE_STATUS, YK_INK2);
-    s_hint_until_us = esp_timer_get_time() + 20 * 1000000LL;
-    tuner_show_station(s_station, false);
+    s_hint_until_us = esp_timer_get_time() + HINT_US;
+    tuner_show_station(s_city, s_station, false);
+    picker_create(screen);  // hidden, over the tuner
     show_status();
     lv_screen_load(screen);
     lv_refr_now(NULL);
@@ -275,5 +364,5 @@ void app_main(void) {
     err = yk_wifi_start();
     if (err != ESP_OK) ESP_LOGE(TAG, "Wi-Fi did not start (%s)", esp_err_to_name(err));
     ESP_ERROR_CHECK(radio_init());
-    radio_play(s_station);
+    radio_play(station_at(s_city, s_station));
 }
