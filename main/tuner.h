@@ -1,6 +1,6 @@
-// The tuner face: an FM dial along the bottom of the round screen (87.5 .. 108 MHz, low on the left) with a dot per
-// station of the city and a coral needle that slides to the station tuned, the frequency large in the middle, and a
-// row of level bars that move with what the speaker plays. LVGL: call with the board lock held (or from LVGL callbacks).
+// The tuner face: the frequency large in the middle and, along the bottom of the round screen, a signal line across
+// the FM band (87.5 .. 108 MHz, low on the left) with a peak at each of the city's stations, the one playing coral and
+// moving with what the speaker plays. LVGL: call with the board lock held (or from LVGL callbacks).
 #pragma once
 
 #include <stdbool.h>
@@ -11,8 +11,9 @@ void tuner_create(lv_obj_t *screen);
 /** The city and the station's name in English (the owner's language) from the next tuner_show_station, else Chinese
  *  (the default). */
 void tuner_set_english(bool on);
-/** Shows the city's station at this index, with a dot on the dial per station of the city; `slide` moves the needle
- *  there (else it jumps). */
+/** Shows the city's station at this index: its peak turns coral. `slide` (tuning) lets the new peak rise from the
+ *  others' height; else it keeps its height. */
 void tuner_show_station(int city, int index, bool slide);
-/** Level bars: `level` 0..100 from yk_speak_level(); `live` false lays them flat and grey (paused, connecting). */
+/** The playing station's peak: `level` 0..100 from yk_speak_level(); `live` false lays it down to the others'
+ *  height (paused, connecting). */
 void tuner_level(int level, bool live);

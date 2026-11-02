@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "../main/pcm_conv.h"
+#include "../main/spectrum.h"
 #include "../main/stations.h"
 
 static int failures, checks;
@@ -22,7 +23,7 @@ static void test_stations(void) {
     CHECK(city_wrap(cities) == 0 && city_wrap(-1) == cities - 1);
     for (int c = 0; c < cities; c++) {
         const int n = city_stations(c);
-        CHECK(n >= 2 && n <= 255);
+        CHECK(n >= 2 && n <= CITY_MAX_STATIONS);
         CHECK(station_step(c, n - 1, 1) == 0);
         CHECK(station_step(c, 0, -1) == n - 1);
         CHECK(station_at(c, n) == station_at(c, 0));
@@ -36,7 +37,7 @@ static void test_stations(void) {
             CHECK(!strcmp(s->city, city_name(c, false)));  // a city's stations are all in it
             CHECK(strlen(s->city_en) <= 9);  // along the circle: short (Guangzhou, Chongqing are the longest)
             CHECK(s->mhz10 >= FM_MIN_10 && s->mhz10 <= FM_MAX_10);
-            if (i) CHECK(s->mhz10 > station_at(c, i - 1)->mhz10);  // low to high: next = to the right on the dial
+            if (i) CHECK(s->mhz10 >= station_at(c, i - 1)->mhz10 + CITY_MIN_GAP_10);  // low to high, peaks apart
             for (int d = 0; d < c; d++)  // no stream twice
                 for (int j = 0; j < city_stations(d); j++) CHECK(strcmp(s->url, station_at(d, j)->url));
         }
@@ -62,6 +63,27 @@ static void test_stations(void) {
     CHECK(!strcmp(text, "Listened to Beijing Traffic for 1 minute"));
     listen_sentence(&st, 20, true, text, sizeof(text));
     CHECK(!strcmp(text, "Listened to Beijing Traffic for a moment"));
+}
+
+/** The dial's signal line: each station's peak is its own, and the pieces of the line meet. */
+static void test_spectrum(void) {
+    CHECK(spec_step(FM_MIN_10) == 0 && spec_step(FM_MAX_10) == SPEC_STEPS - 1);
+    CHECK(spec_step(800) == 0 && spec_step(1200) == SPEC_STEPS - 1);
+    // A peak is under a pixel past its half window: the line drawn without it joins the one drawn with it.
+    CHECK(spec_peak(1000, SPEC_LIVE, spec_step(1000) + SPEC_HALF + 1) < 0.5f);
+    CHECK(spec_peak(1000, SPEC_LIVE, spec_step(1000) - SPEC_HALF - 1) < 0.5f);
+    CHECK(spec_peak(1000, SPEC_LIVE, spec_step(1000)) == SPEC_LIVE);
+    for (int c = 0; c < cities_count(); c++)
+        for (int s = 0; s < city_stations(c); s++) {
+            const int at = spec_step(station_at(c, s)->mhz10);
+            // The highest point of the line is at the station's own frequency.
+            const float top = spec_height(c, -1, at);
+            CHECK(top >= SPEC_REST && top <= SPEC_REST + 2);
+            CHECK(spec_height(c, -1, at - 2) < top && spec_height(c, -1, at + 2) < top);
+            // In the playing station's window (drawn coral) the other stations add under a pixel.
+            for (int i = at - SPEC_HALF; i <= at + SPEC_HALF; i++)
+                if (i >= 0 && i < SPEC_STEPS) CHECK(spec_height(c, s, i) < 1.0f + 0.5f);
+        }
 }
 
 /** Converts `frames` stereo frames of a ramp in blocks of `block`; returns the output count. */
@@ -125,6 +147,7 @@ static void test_pcm(void) {
 
 int main(void) {
     test_stations();
+    test_spectrum();
     test_pcm();
     printf("city-radio host tests: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

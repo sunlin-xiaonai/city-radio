@@ -1,4 +1,4 @@
-idf_component_register(SRCS "main.c" "radio.c" "stations.c" "pcm_conv.c" "tuner.c" "picker.c"
+idf_component_register(SRCS "main.c" "radio.c" "stations.c" "pcm_conv.c" "spectrum.c" "tuner.c" "picker.c"
     INCLUDE_DIRS "."
     REQUIRES yaykit_board lvgl__lvgl yaykit_app yaykit_key yaykit_link yaykit_ui yaykit_speak yaykit_wifi yaykit_cloud
     PRIV_REQUIRES nvs_flash console esp_timer esp_http_client esp_wifi espressif__esp_audio_codec)

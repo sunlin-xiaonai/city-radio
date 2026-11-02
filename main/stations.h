@@ -6,6 +6,8 @@
 
 #define FM_MIN_10 875   // the dial's ends, in 0.1 MHz
 #define FM_MAX_10 1080
+#define CITY_MAX_STATIONS 8  // the most a city has (the dial draws a peak per station)
+#define CITY_MIN_GAP_10 11   // the least between a city's stations, 0.1 MHz: their peaks stay apart
 
 typedef struct {
     const char *city;     // 北京

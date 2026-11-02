@@ -3,156 +3,120 @@
 #include <math.h>
 #include <stdio.h>
 
+#include "spectrum.h"
 #include "stations.h"
 #include "yaykit_ui.h"
 
-// Concentric, like a radio's dial face: the city along the top of the circle, a thin inner ring around the
-// frequency, and the FM dial along the bottom with its baseline, ticks growing inwards from it, a dot on the
-// baseline per station and a coral needle across it. All inside the radius-200 content circle. LVGL measures angles
-// clockwise from 3 o'clock; the dial is its bottom quarter, 45 .. 135 degrees, low frequencies on the left.
-#define CITY_R 178        // the city's baseline along the top
-#define RING_R 160        // the inner ring around the frequency
-#define DIAL_R 188        // the dial's baseline
-#define DIAL_FROM 45
-#define DIAL_SPAN 90
-#define DOT_D 10          // station dots, centred on the baseline
-#define NEEDLE_IN 166
-#define NEEDLE_OUT 198
-#define SLIDE_MS 400
+// The city along the top of the circle, the frequency large in the middle, and along the bottom a quiet signal line
+// across the FM band with a peak at each of the city's stations: sage, the one playing coral, rising and falling with
+// what the speaker plays. All inside the radius-200 content circle. LVGL measures angles clockwise from 3 o'clock;
+// the line is its bottom quarter, 45 .. 135 degrees, low frequencies on the left. One function (point_at) places
+// every point, so a peak always sits where its frequency is.
+#define CITY_R 178   // the city's baseline along the top
+#define LINE_R 192   // the signal line's baseline; peaks rise inwards from it
+#define LINE_FROM 45
+#define LINE_SPAN 90
+#define ENDS_R 186   // 88 and 108, just past the line's ends
+#define ENDS_DEG 6
 
 #define FM_Y 102
 #define FREQ_Y 118
 #define NAME_Y 250
 
-#define BARS 11
-#define BAR_W 6
-#define BAR_GAP 7
-#define BAR_MAX 36
-#define BAR_MIN 4
-#define BARS_Y 302        // the bars' centre line
+#define WINDOW (2 * SPEC_HALF + 1)
 
-static lv_obj_t *s_screen, *s_city, *s_freq, *s_name, *s_needle;
-static lv_obj_t *s_dots;    // the station dots of the city shown
-static int s_dots_city = -1;
-static lv_obj_t *s_bars[BARS];
-static lv_point_precise_t s_needle_pts[2];
-static int s_needle_pm = -1;  // where the needle is, permille of the dial
+static lv_obj_t *s_screen, *s_city, *s_freq, *s_name;
+static lv_obj_t *s_left, *s_right;              // the quiet line either side of the playing station's peak
+static lv_obj_t *s_peaks[CITY_MAX_STATIONS];    // the other stations' peaks, over the quiet line
+static lv_obj_t *s_live;                        // the playing station's peak
+static lv_point_precise_t s_line[SPEC_STEPS];   // the line without the playing station's peak
+static lv_point_precise_t s_live_pts[WINDOW];
+static int s_city_shown = -1, s_station_shown = -1, s_live_from, s_live_n;
+static float s_live_h = SPEC_REST, s_live_drawn = -1;
 static bool s_english;
-static float s_bar_h[BARS];
-static uint32_t s_seed = 0x2545F491;
 
-/** The dial angle (degrees, LVGL's) of a permille, low frequencies on the left. */
-static float dial_deg(int pm) { return DIAL_FROM + DIAL_SPAN * (1000 - pm) / 1000.0f; }
-
-static void point_at(float deg, float r, lv_point_precise_t *p) {
-    const float a = deg * (float)M_PI / 180.0f;
+/** Step i of the band at h pixels above the baseline. */
+static void point_at(int i, float h, lv_point_precise_t *p) {
+    const float deg = LINE_FROM + LINE_SPAN * (float)(SPEC_STEPS - 1 - i) / (SPEC_STEPS - 1);
+    const float a = deg * (float)M_PI / 180.0f, r = LINE_R - h;
     p->x = YK_CX + r * cosf(a);
     p->y = YK_CY + r * sinf(a);
 }
 
-static void needle_to(int pm) {
-    s_needle_pm = pm;
-    const float deg = dial_deg(pm);
-    point_at(deg, NEEDLE_IN, &s_needle_pts[0]);
-    point_at(deg, NEEDLE_OUT, &s_needle_pts[1]);
-    lv_line_set_points(s_needle, s_needle_pts, 2);
-}
-
-static void needle_anim(void *var, int32_t v) {
-    (void)var;
-    needle_to((int)v);
-}
-
-static lv_obj_t *circle(lv_obj_t *parent, int d, int cx, int cy) {
-    lv_obj_t *o = lv_obj_create(parent);
-    lv_obj_remove_style_all(o);
-    lv_obj_set_size(o, d, d);
-    lv_obj_set_pos(o, cx - d / 2, cy - d / 2);
-    lv_obj_set_style_radius(o, LV_RADIUS_CIRCLE, 0);
+static lv_obj_t *line(lv_obj_t *parent, uint32_t color, int width, lv_opa_t opa) {
+    lv_obj_t *o = lv_line_create(parent);
+    lv_obj_set_style_line_color(o, lv_color_hex(color), 0);
+    lv_obj_set_style_line_width(o, width, 0);
+    lv_obj_set_style_line_opa(o, opa, 0);
+    lv_obj_set_style_line_rounded(o, true, 0);
     lv_obj_set_clickable(o, false);
     return o;
+}
+
+/** A small label centred on a point. */
+static void label_at(lv_obj_t *parent, const char *text, float deg, int r) {
+    const float a = deg * (float)M_PI / 180.0f;
+    const int x = (int)lroundf(YK_CX + r * cosf(a)), y = (int)lroundf(YK_CY + r * sinf(a));
+    yk_ui_label(parent, text, x - 30, y - 11, 60, YK_SIZE_MIN, YK_INK3);
 }
 
 void tuner_set_english(bool on) { s_english = on; }
 
 void tuner_create(lv_obj_t *screen) {
     s_screen = screen;
-    lv_obj_t *ring = circle(screen, 2 * RING_R, YK_CX, YK_CY);
-    lv_obj_set_style_border_color(ring, lv_color_hex(YK_PANEL), 0);
-    lv_obj_set_style_border_width(ring, 2, 0);
-
-    // The dial: the baseline arc, ticks inwards from it, a longer one every fourth.
-    lv_obj_t *scale = lv_scale_create(screen);
-    lv_obj_set_size(scale, 2 * DIAL_R, 2 * DIAL_R);
-    lv_obj_center(scale);
-    lv_scale_set_mode(scale, LV_SCALE_MODE_ROUND_INNER);
-    lv_scale_set_rotation(scale, DIAL_FROM);
-    lv_scale_set_angle_range(scale, DIAL_SPAN);
-    lv_scale_set_range(scale, 0, 1000);
-    lv_scale_set_total_tick_count(scale, 41);
-    lv_scale_set_major_tick_every(scale, 4);
-    lv_scale_set_label_show(scale, false);
-    lv_obj_set_style_bg_opa(scale, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_arc_color(scale, lv_color_hex(YK_INK3), LV_PART_MAIN);
-    lv_obj_set_style_arc_width(scale, 2, LV_PART_MAIN);
-    lv_obj_set_style_line_color(scale, lv_color_hex(YK_INK3), LV_PART_ITEMS);
-    lv_obj_set_style_line_width(scale, 2, LV_PART_ITEMS);
-    lv_obj_set_style_length(scale, 6, LV_PART_ITEMS);
-    lv_obj_set_style_line_color(scale, lv_color_hex(YK_INK2), LV_PART_INDICATOR);
-    lv_obj_set_style_line_width(scale, 2, LV_PART_INDICATOR);
-    lv_obj_set_style_length(scale, 12, LV_PART_INDICATOR);
-    lv_obj_set_clickable(scale, false);
-
-    // The station dots go in here (tuner_show_station), under the needle.
-    s_dots = lv_obj_create(screen);
-    lv_obj_remove_style_all(s_dots);
-    lv_obj_set_size(s_dots, 466, 466);
-    lv_obj_set_clickable(s_dots, false);
-    lv_obj_set_event_bubble(s_dots, true);
-    lv_obj_set_gesture_bubble(s_dots, true);
-
-    s_needle = lv_line_create(screen);
-    lv_obj_set_style_line_color(s_needle, lv_color_hex(YK_CORAL), 0);
-    lv_obj_set_style_line_width(s_needle, 5, 0);
-    lv_obj_set_style_line_rounded(s_needle, true, 0);
-    lv_obj_set_clickable(s_needle, false);
+    s_left = line(screen, YK_INK3, 2, LV_OPA_70);
+    s_right = line(screen, YK_INK3, 2, LV_OPA_70);
+    for (int i = 0; i < CITY_MAX_STATIONS; i++) s_peaks[i] = line(screen, YK_SAGE, 3, LV_OPA_COVER);
+    s_live = line(screen, YK_CORAL, 4, LV_OPA_COVER);
+    label_at(screen, "88", LINE_FROM + LINE_SPAN + ENDS_DEG, ENDS_R);
+    label_at(screen, "108", LINE_FROM - ENDS_DEG, ENDS_R);
 
     yk_ui_label(screen, "FM", 0, FM_Y, 466, YK_SIZE_MIN, YK_INK3);
     s_freq = yk_ui_label(screen, "", 0, FREQ_Y, 466, YK_SIZE_HERO_MIN, YK_INK);
     s_name = yk_ui_label(screen, "", 0, NAME_Y, 466, YK_SIZE_HEADING, YK_INK2);
-
-    const int x0 = YK_CX - (BARS * BAR_W + (BARS - 1) * BAR_GAP) / 2;
-    for (int i = 0; i < BARS; i++) {
-        lv_obj_t *bar = lv_obj_create(screen);
-        lv_obj_remove_style_all(bar);
-        lv_obj_set_style_radius(bar, BAR_W / 2, 0);
-        lv_obj_set_style_bg_color(bar, lv_color_hex(YK_INK3), 0);
-        lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
-        lv_obj_set_pos(bar, x0 + i * (BAR_W + BAR_GAP), BARS_Y - BAR_MIN / 2);
-        lv_obj_set_size(bar, BAR_W, BAR_MIN);
-        lv_obj_set_clickable(bar, false);
-        s_bars[i] = bar;
-        s_bar_h[i] = BAR_MIN;
-    }
 }
 
-/** A dot per station of the city, centred on the baseline. */
-static void show_dots(int city) {
-    if (city == s_dots_city) return;
-    s_dots_city = city;
-    lv_obj_clean(s_dots);
-    for (int i = 0; i < city_stations(city); i++) {
-        lv_point_precise_t p;
-        point_at(dial_deg(dial_permille(station_at(city, i)->mhz10)), DIAL_R - 1, &p);
-        lv_obj_t *dot = circle(s_dots, DOT_D, (int)lroundf(p.x), (int)lroundf(p.y));
-        lv_obj_set_style_bg_color(dot, lv_color_hex(YK_SAGE), 0);
-        lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+/** The steps of a peak's window, clamped into the band. */
+static void window(int mhz10, int *from, int *n) {
+    const int c = spec_step(mhz10);
+    const int lo = c - SPEC_HALF < 0 ? 0 : c - SPEC_HALF;
+    const int hi = c + SPEC_HALF >= SPEC_STEPS ? SPEC_STEPS - 1 : c + SPEC_HALF;
+    *from = lo, *n = hi - lo + 1;
+}
+
+/** The playing station's peak at its height now (the quiet line under it, plus the peak). */
+static void draw_live(void) {
+    const int mhz10 = station_at(s_city_shown, s_station_shown)->mhz10;
+    for (int k = 0; k < s_live_n; k++) {
+        const int i = s_live_from + k;
+        point_at(i, spec_height(s_city_shown, s_station_shown, i) + spec_peak(mhz10, s_live_h, i), &s_live_pts[k]);
     }
+    lv_line_set_points(s_live, s_live_pts, s_live_n);
+    s_live_drawn = s_live_h;
+}
+
+/** The quiet line and the other stations' peaks, for the station playing. */
+static void draw_line(int city, int index) {
+    s_city_shown = city, s_station_shown = index;
+    for (int i = 0; i < SPEC_STEPS; i++) point_at(i, spec_height(city, index, i), &s_line[i]);
+    window(station_at(city, index)->mhz10, &s_live_from, &s_live_n);
+    // The quiet line stops where the playing station's peak starts and goes on where it ends.
+    const int end = s_live_from + s_live_n - 1;
+    lv_line_set_points(s_left, s_line, s_live_from + 1);
+    lv_line_set_points(s_right, &s_line[end], SPEC_STEPS - end);
+    for (int s = 0; s < CITY_MAX_STATIONS; s++) {
+        const bool other = s < city_stations(city) && s != index;
+        lv_obj_set_hidden(s_peaks[s], !other);
+        if (!other) continue;
+        int from, n;
+        window(station_at(city, s)->mhz10, &from, &n);
+        lv_line_set_points(s_peaks[s], &s_line[from], n);
+    }
+    draw_live();
 }
 
 void tuner_show_station(int city, int index, bool slide) {
     const station_t *st = station_at(city, index);
-    show_dots(city);
     char text[16];
     station_freq_text(st, text, sizeof(text));
     lv_label_set_text(s_freq, text);
@@ -160,43 +124,23 @@ void tuner_show_station(int city, int index, bool slide) {
     // The city along the top of the circle (one label per character: short names only).
     if (s_city) lv_obj_delete(s_city);
     s_city = yk_ui_arc_label(s_screen, station_city(st, s_english), YK_SIZE_STATUS, YK_SAGE_TEXT, 0, CITY_R, false);
-    const int target = dial_permille(st->mhz10);
-    lv_anim_delete(NULL, needle_anim);
-    if (!slide || s_needle_pm < 0) {
-        needle_to(target);
-        return;
-    }
-    lv_anim_t a;
-    lv_anim_init(&a);
-    lv_anim_set_exec_cb(&a, needle_anim);
-    lv_anim_set_values(&a, s_needle_pm, target);
-    lv_anim_set_duration(&a, SLIDE_MS);
-    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
-    lv_anim_start(&a);
+    index = station_step(city, index, 0);
+    if (city == s_city_shown && index == s_station_shown) return;
+    if (slide) s_live_h = SPEC_REST;  // the new station's peak rises from where the others are
+    draw_line(city, index);
 }
 
 void tuner_level(int level, bool live) {
-    static bool was_live;
-    for (int i = 0; i < BARS; i++) {
-        float target = BAR_MIN;
-        if (live) {
-            // Taller in the middle, each bar wobbling on its own, all following the speaker's level.
-            s_seed = s_seed * 1664525u + 1013904223u;
-            const float shape = 1.0f - fabsf(i - (BARS - 1) / 2.0f) / BARS;
-            const float wobble = 0.55f + 0.45f * (float)(s_seed >> 24) / 255.0f;
-            target = BAR_MIN + (BAR_MAX - BAR_MIN) * (level / 100.0f) * shape * wobble;
-        }
-        // Up fast, down slowly.
-        s_bar_h[i] += (target - s_bar_h[i]) * (target > s_bar_h[i] ? 0.7f : 0.25f);
-        const int h = (int)(s_bar_h[i] + 0.5f);
-        if (lv_obj_get_height(s_bars[i]) != h) {
-            lv_obj_set_height(s_bars[i], h);
-            lv_obj_set_y(s_bars[i], BARS_Y - h / 2);
-        }
+    static uint32_t seed = 0x2545F491;
+    if (s_station_shown < 0) return;
+    float target = SPEC_REST;
+    if (live) {
+        // With the speaker's level, a little unsteady like a real signal.
+        seed = seed * 1664525u + 1013904223u;
+        const float wobble = 0.8f + 0.2f * (float)(seed >> 24) / 255.0f;
+        target = SPEC_REST + (SPEC_LIVE - SPEC_REST) * (level / 100.0f) * wobble;
     }
-    if (live != was_live) {
-        was_live = live;
-        for (int i = 0; i < BARS; i++)
-            lv_obj_set_style_bg_color(s_bars[i], lv_color_hex(live ? YK_SAGE : YK_INK3), 0);
-    }
+    // Up fast, down slowly.
+    s_live_h += (target - s_live_h) * (target > s_live_h ? 0.6f : 0.2f);
+    if (fabsf(s_live_h - s_live_drawn) >= 0.5f) draw_live();
 }

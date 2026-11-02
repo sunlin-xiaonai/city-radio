@@ -343,7 +343,7 @@ void app_main(void) {
     s_rim = yk_rim_create(screen);
     // The round-screen spec's colours and sizes (yk_round.h); text inside the radius-200 circle.
     tuner_create(screen);
-    s_status = yk_ui_label(screen, "", 0, 334, 466, YK_SIZE_STATUS, YK_INK2);
+    s_status = yk_ui_label(screen, "", 0, 298, 466, YK_SIZE_STATUS, YK_INK2);  // under the name, clear of the peaks
     s_hint_until_us = esp_timer_get_time() + HINT_US;
     tuner_show_station(s_city, s_station, false);
     picker_create(screen);  // hidden, over the tuner
