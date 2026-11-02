@@ -5,6 +5,7 @@ name: Check
 on:
   push:
   pull_request:
+  workflow_dispatch:  # run it again by hand (Actions → Check → Run workflow)
 permissions:
   contents: read
 jobs:
