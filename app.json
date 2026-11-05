@@ -1,7 +1,7 @@
 {
   "slug": "city-radio",
   "kind": "extension",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "name": {
     "zh": "收音台",
     "en": "Radio"
@@ -10,7 +10,7 @@
     "tikpal-r1"
   ],
   "layout": "yaykit-v1",
-  "minYay": "0.1.10",
+  "minYay": "0.1.13",
   "apiLevel": 3,
   "capabilities": {},
   "launch": {
@@ -52,5 +52,33 @@
   "audience": "all",
   "pricing": {
     "kind": "free"
+  },
+  "voiceCode": {
+    "number": 261,
+    "ask": {
+      "zh": [
+        "怎么使用收音台？"
+      ],
+      "en": [
+        "How do I use Radio?"
+      ]
+    }
+  },
+  "permissions": {
+    "device": [
+      "speaker"
+    ]
+  },
+  "ageRating": "4+",
+  "privacy": {
+    "collects": [
+      {
+        "data": "usage",
+        "why": {
+          "zh": "记录所选电台、城市和收听时长，用于收听总结。城市不是设备定位。",
+          "en": "Keep the selected station, city and listening duration for a session summary. City is not device location."
+        }
+      }
+    ]
   }
 }
