@@ -19,6 +19,7 @@
 #include "nvs_flash.h"
 #include "picker.h"
 #include "radio.h"
+#include "selection.h"
 #include "stations.h"
 #include "tuner.h"
 #include "yaykit_account.h"
@@ -45,6 +46,10 @@ static volatile bool s_tapped;          // set in the key task, acted on in the 
 static volatile int s_swipe;            // -1 / +1 from a gesture, acted on in the next tick
 static volatile bool s_swiped_up;       // a swipe up: the city picker, in the next tick
 static bool s_english;                  // the owner's language is not Chinese: the screen in English
+static selection_cache_t s_selection;
+static portMUX_TYPE s_selection_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_selection_flushing;
+static int64_t s_selection_last_attempt;
 
 /** The screen's text in its language. */
 static const char *T(const char *zh, const char *en) { return s_english ? en : zh; }
@@ -69,20 +74,53 @@ static void on_gesture(lv_event_t *e) {
     else if (dir == LV_DIR_TOP) s_swiped_up = true;
 }
 
-/** The city, and the station last played in each city ("st<city>"). */
+/** Keep changes in RAM and batch NVS writes, rather than writing on each swipe. */
 static void save_station(void) {
+    int64_t now = esp_timer_get_time();
+    portENTER_CRITICAL(&s_selection_lock);
+    selection_select(&s_selection, s_city, s_station, now);
+    portEXIT_CRITICAL(&s_selection_lock);
+}
+
+static void flush_stations(bool force, int64_t now) {
+    selection_snapshot_t snapshot;
+    portENTER_CRITICAL(&s_selection_lock);
+    bool ready = !s_selection_flushing &&
+        (force || (selection_due(&s_selection, now) && now - s_selection_last_attempt >= SELECTION_INTERVAL_US)) &&
+        selection_snapshot(&s_selection, &snapshot);
+    if (ready) {
+        s_selection_flushing = true;
+        s_selection_last_attempt = now;
+    }
+    portEXIT_CRITICAL(&s_selection_lock);
+    if (!ready) return;
+
     nvs_handle_t h;
-    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
-    char key[8];
-    snprintf(key, sizeof(key), "st%d", s_city);
-    nvs_set_u8(h, "city", (uint8_t)s_city);
-    nvs_set_u8(h, key, (uint8_t)s_station);
-    nvs_commit(h);
-    nvs_close(h);
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        if (snapshot.city_dirty) err = nvs_set_u8(h, "city", snapshot.city);
+        for (int i = 0; i < SELECTION_CITIES && err == ESP_OK; ++i) {
+            if (!(snapshot.dirty & (1u << i))) continue;
+            char key[8];
+            snprintf(key, sizeof(key), "st%d", i);
+            err = nvs_set_u8(h, key, snapshot.stations[i]);
+        }
+        if (err == ESP_OK) err = nvs_commit(h);
+        nvs_close(h);
+    }
+    portENTER_CRITICAL(&s_selection_lock);
+    selection_finish(&s_selection, &snapshot, err == ESP_OK);
+    s_selection_flushing = false;
+    portEXIT_CRITICAL(&s_selection_lock);
 }
 
 /** The last station played in this city (its first, by frequency, the first time). */
 static int load_station(int city) {
+    city = city_wrap(city);
+    portENTER_CRITICAL(&s_selection_lock);
+    int cached = selection_get(&s_selection, city);
+    portEXIT_CRITICAL(&s_selection_lock);
+    if (cached >= 0) return station_step(city, cached, 0);
     nvs_handle_t h;
     uint8_t v = 0;
     char key[8];
@@ -91,7 +129,11 @@ static int load_station(int city) {
         nvs_get_u8(h, key, &v);
         nvs_close(h);
     }
-    return station_step(city, v, 0);
+    int station = station_step(city, v, 0);
+    portENTER_CRITICAL(&s_selection_lock);
+    selection_load(&s_selection, city, station);
+    portEXIT_CRITICAL(&s_selection_lock);
+    return station;
 }
 
 static int load_city(void) {
@@ -166,6 +208,7 @@ static void choose_city(int city) {
 static void tick(lv_timer_t *timer) {
     (void)timer;
     const int64_t now = esp_timer_get_time();
+    flush_stations(false, now);
     if (radio_state() == RADIO_PLAYING && !s_paused) s_listened_us += now - s_last_tick_us;
     s_last_tick_us = now;
     if (picker_is_open()) {
@@ -199,6 +242,7 @@ static void tick(lv_timer_t *timer) {
  *  back. Runs in a task of yaykit_app's, cut after YK_APP_LEAVE_MS (400 ms): keep it to writing. */
 static void on_leave(void *ctx) {
     (void)ctx;
+    flush_stations(true, esp_timer_get_time());
     const int seconds = (int)(s_listened_us / 1000000);
     if (seconds < 5) return;  // nothing really heard: Yay just comes back
     const station_t *st = station_at(s_city, s_station);
