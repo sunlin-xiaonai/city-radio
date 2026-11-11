@@ -141,7 +141,7 @@ static void show_status(void) {
 
 static void tune(int delta) {
     s_station = station_step(s_city, s_station, delta);
-    printf("CITYRADIO_TUNE city=%d station=%d name=\"%s\"\n", s_city, s_station, station_at(s_city, s_station)->name);
+    printf("CITYRADIO_TUNE\n");
     tuner_show_station(s_city, s_station, true);
     save_station();
     s_paused = false;
@@ -155,7 +155,7 @@ static void choose_city(int city) {
     if (city == s_city) return;
     s_city = city;
     s_station = load_station(city);
-    printf("CITYRADIO_CITY city=%d name=\"%s\"\n", s_city, city_name(s_city, false));
+    printf("CITYRADIO_CITY\n");
     tuner_show_station(s_city, s_station, false);
     save_station();
     s_paused = false;
@@ -327,7 +327,7 @@ void app_main(void) {
         s_english = yk_account_english();
     // 5. Launch parameters from Yay (read once; this version takes none).
     yk_launch_t launch;
-    if (yk_app_launch(&launch) == ESP_OK && launch.present) printf("CITY_RADIO_LAUNCH intent=%s params=%s\n", launch.intent, launch.params);
+    (void)yk_app_launch(&launch);
     s_city = load_city();
     s_station = load_station(s_city);
 

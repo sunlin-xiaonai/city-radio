@@ -180,7 +180,7 @@ static bool play_stream(const station_t *st, uint32_t gen) {
     S.state = RADIO_CONNECTING;
     S.stats.bytes = 0;
     S.stats.rebuffers = 0;
-    printf("CITYRADIO_CONNECT station=\"%s\"\n", st->name);
+    printf("CITYRADIO_CONNECT\n");
     // Modem sleep (yaykit_wifi's default) slows a steady stream down below real time: off while playing.
     esp_wifi_set_ps(WIFI_PS_NONE);
     // Hand the station to the reader (idle now: the previous station's reader gave net_done).
@@ -276,8 +276,7 @@ static bool play_stream(const station_t *st, uint32_t gen) {
             track.pushed += m;
             if (S.state != RADIO_PLAYING && gen == S.gen) {
                 S.state = RADIO_PLAYING;
-                printf("CITYRADIO_PLAYING station=\"%s\" buffered=%u\n", st->name,
-                       (unsigned)xStreamBufferBytesAvailable(S.net));
+                printf("CITYRADIO_PLAYING buffered=%u\n", (unsigned)xStreamBufferBytesAvailable(S.net));
             }
         }
     }
